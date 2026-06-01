@@ -1,0 +1,192 @@
+version: '3.8'
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    hostname: zookeeper
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    hostname: kafka
+    container_name: kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      KAFKA_LOG_RETENTION_HOURS: 24
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:29092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  kafka-setup:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: kafka-setup
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: >
+      bash -c "
+        echo 'Creating Kafka topics...' &&
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic user-events --partitions 3 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic content-metadata --partitions 1 --replication-factor 1 --config cleanup.policy=compact --config min.cleanable.dirty.ratio=0.01 --config segment.ms=10000 &&
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic feature-store --partitions 3 --replication-factor 1 --config cleanup.policy=compact --config min.cleanable.dirty.ratio=0.01 --config segment.ms=10000 &&
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic flink-metrics --partitions 1 --replication-factor 1 &&
+        echo 'Topics created successfully.' &&
+        kafka-topics --bootstrap-server kafka:29092 --list
+      "
+    restart: on-failure
+
+  flink-jobmanager:
+    image: flink:1.17-java11
+    hostname: flink-jobmanager
+    container_name: flink-jobmanager
+    ports:
+      - "8081:8081"
+    command: jobmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        parallelism.default: 2
+        execution.checkpointing.interval: 30000
+        state.backend: filesystem
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+    volumes:
+      - flink-checkpoints:/opt/flink/checkpoints
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/overview"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  flink-taskmanager:
+    image: flink:1.17-java11
+    hostname: flink-taskmanager
+    container_name: flink-taskmanager
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    command: taskmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        parallelism.default: 2
+        execution.checkpointing.interval: 30000
+        state.backend: filesystem
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+    volumes:
+      - flink-checkpoints:/opt/flink/checkpoints
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://flink-jobmanager:8081/taskmanagers | grep -q taskmanagers"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  flink-job-submitter:
+    build:
+      context: ./flink-job
+      dockerfile: Dockerfile
+    container_name: flink-job-submitter
+    depends_on:
+      kafka-setup:
+        condition: service_completed_successfully
+      flink-taskmanager:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
+      USER_EVENTS_TOPIC: ${USER_EVENTS_TOPIC:-user-events}
+      CONTENT_METADATA_TOPIC: ${CONTENT_METADATA_TOPIC:-content-metadata}
+      FEATURE_STORE_TOPIC: ${FEATURE_STORE_TOPIC:-feature-store}
+      FLINK_METRICS_TOPIC: ${FLINK_METRICS_TOPIC:-flink-metrics}
+      FLINK_JOBMANAGER_URL: http://flink-jobmanager:8081
+      WATERMARK_SECONDS: ${WATERMARK_SECONDS:-30}
+    restart: on-failure
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://flink-jobmanager:8081/jobs"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  producer:
+    build:
+      context: ./producer
+      dockerfile: Dockerfile
+    container_name: producer
+    depends_on:
+      kafka-setup:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
+      USER_EVENTS_TOPIC: ${USER_EVENTS_TOPIC:-user-events}
+      CONTENT_METADATA_TOPIC: ${CONTENT_METADATA_TOPIC:-content-metadata}
+      TIME_ACCELERATION: ${TIME_ACCELERATION:-60}
+      LATE_EVENT_RATIO: ${LATE_EVENT_RATIO:-0.07}
+      LATE_EVENT_DELAY_MIN_SECONDS: ${LATE_EVENT_DELAY_MIN_SECONDS:-35}
+      LATE_EVENT_DELAY_MAX_SECONDS: ${LATE_EVENT_DELAY_MAX_SECONDS:-90}
+      NUM_USERS: ${NUM_USERS:-20}
+      NUM_CONTENT: ${NUM_CONTENT:-50}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; open('/tmp/producer_alive').close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: dashboard
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
+      FEATURE_STORE_TOPIC: ${FEATURE_STORE_TOPIC:-feature-store}
+      FLINK_METRICS_TOPIC: ${FLINK_METRICS_TOPIC:-flink-metrics}
+      FLINK_JOB_MANAGER_URL: http://flink-jobmanager:8081
+      DASHBOARD_PORT: 8080
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  flink-checkpoints:

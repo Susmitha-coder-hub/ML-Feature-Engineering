@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>ML Feature Pipeline — Dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --accent: #58a6ff; --green: #3fb950; --yellow: #d29922;
+    --red: #f85149; --text: #e6edf3; --muted: #8b949e;
+    --font: 'SF Mono', 'Fira Code', monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 24px; background: var(--surface); border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 16px; color: var(--accent); letter-spacing: 0.5px; }
+  .status-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .dot-green { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot-red   { background: var(--red); }
+  .dot-yellow{ background: var(--yellow); }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 20px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .card h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 12px; }
+
+  .metric-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .metric-row:last-child { border-bottom: none; }
+  .metric-label { color: var(--muted); }
+  .metric-value { color: var(--accent); font-weight: 700; }
+  .metric-value.bad  { color: var(--red); }
+  .metric-value.warn { color: var(--yellow); }
+  .metric-value.good { color: var(--green); }
+
+  .search-bar { display: flex; gap: 8px; margin-bottom: 12px; }
+  .search-bar input {
+    flex: 1; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 12px; color: var(--text); font-family: var(--font);
+    font-size: 13px;
+  }
+  .search-bar input:focus { outline: none; border-color: var(--accent); }
+  .search-bar button {
+    background: var(--accent); color: #000; border: none; border-radius: 6px;
+    padding: 8px 16px; cursor: pointer; font-family: var(--font); font-weight: 700;
+  }
+  .search-bar button:hover { opacity: 0.85; }
+
+  .feature-table { width: 100%; border-collapse: collapse; }
+  .feature-table th { text-align: left; color: var(--muted); font-size: 11px; text-transform: uppercase; padding: 4px 8px; }
+  .feature-table td { padding: 6px 8px; border-top: 1px solid var(--border); }
+  .feature-table td:last-child { color: var(--muted); font-size: 11px; }
+  .fresh  { color: var(--green); }
+  .stale  { color: var(--yellow); }
+  .vstal  { color: var(--red); }
+
+  #event-log { height: 200px; overflow-y: auto; font-size: 11px; }
+  .log-line { padding: 2px 0; border-bottom: 1px solid var(--border); display: flex; gap: 12px; }
+  .log-ts { color: var(--muted); white-space: nowrap; }
+  .log-feat { color: var(--accent); }
+  .log-val  { color: var(--green); }
+
+  .full-width { grid-column: 1 / -1; }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 12px;
+    font-size: 11px; font-weight: 700;
+  }
+  .badge-green  { background: rgba(63,185,80,.2); color: var(--green); }
+  .badge-red    { background: rgba(248,81,73,.2); color: var(--red); }
+  .badge-yellow { background: rgba(210,153,34,.2); color: var(--yellow); }
+
+  .spark { display: flex; align-items: flex-end; gap: 2px; height: 30px; }
+  .spark-bar { width: 8px; background: var(--accent); border-radius: 2px 2px 0 0; opacity: 0.7; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>⚡ Real-Time ML Feature Pipeline</h1>
+  <div id="connection-status">
+    <span class="status-dot dot-yellow" id="ws-dot"></span>
+    <span id="ws-label">Connecting…</span>
+  </div>
+</header>
+
+<div class="grid">
+
+  <!-- Pipeline Health -->
+  <div class="card">
+    <h2>Pipeline Health</h2>
+    <div class="metric-row">
+      <span class="metric-label">Flink Job Status</span>
+      <span class="metric-value" id="flink-status">—</span>
+    </div>
+    <div class="metric-row">
+      <span class="metric-label">Total Features Computed</span>
+      <span class="metric-value good" id="total-features">0</span>
+    </div>
+    <div class="metric-row">
+      <span class="metric-label">Late Events Dropped</span>
+      <span class="metric-value" id="late-dropped">0</span>
+    </div>
+    <div class="metric-row">
+      <span class="metric-label">Current Watermark Lag</span>
+      <span class="metric-value" id="wm-lag">—</span>
+    </div>
+    <div class="metric-row">
+      <span class="metric-label">Last Watermark Timestamp</span>
+      <span class="metric-value" id="wm-ts" style="font-size:11px">—</span>
+    </div>
+    <div class="metric-row">
+      <span class="metric-label">Pipeline Last Update</span>
+      <span class="metric-value" id="last-update" style="font-size:11px">—</span>
+    </div>
+  </div>
+
+  <!-- Feature Freshness -->
+  <div class="card">
+    <h2>Feature Freshness (seconds since last update)</h2>
+    <div id="freshness-list">
+      <div class="metric-row"><span class="metric-label muted">Waiting for data…</span></div>
+    </div>
+  </div>
+
+  <!-- Entity Viewer -->
+  <div class="card full-width">
+    <h2>Entity Feature Viewer</h2>
+    <div class="search-bar">
+      <input type="text" id="entity-input" placeholder="Enter user_id or content_id (e.g. user_001)" />
+      <button onclick="lookupEntity()">Lookup</button>
+    </div>
+    <div id="entity-result">
+      <span style="color:var(--muted)">Enter an entity ID above to see its features.</span>
+    </div>
+  </div>
+
+  <!-- Live Event Log -->
+  <div class="card full-width">
+    <h2>Live Feature Stream</h2>
+    <div id="event-log"></div>
+  </div>
+
+</div>
+
+<script>
+const state = { features: {}, metrics: {}, freshness: {} };
+const MAX_LOG = 100;
+
+// ── WebSocket ──────────────────────────────────────────────────────────────
+const ws = new WebSocket(`ws://${location.host}/ws`);
+
+ws.onopen = () => {
+  document.getElementById('ws-dot').className = 'status-dot dot-green';
+  document.getElementById('ws-label').textContent = 'Connected';
+};
+
+ws.onclose = () => {
+  document.getElementById('ws-dot').className = 'status-dot dot-red';
+  document.getElementById('ws-label').textContent = 'Disconnected';
+};
+
+ws.onmessage = (evt) => {
+  const msg = JSON.parse(evt.data);
+  if (msg.type === 'snapshot') {
+    state.features = msg.features || {};
+    updateMetrics(msg.metrics || {});
+  } else if (msg.type === 'feature_update') {
+    handleFeatureUpdate(msg.data);
+  } else if (msg.type === 'metrics') {
+    updateMetrics(msg.data);
+  }
+};
+
+function handleFeatureUpdate(data) {
+  const { entity_id, feature_name, feature_value, computed_at } = data;
+  if (!entity_id || !feature_name) return;
+  if (!state.features[entity_id]) state.features[entity_id] = {};
+  state.features[entity_id][feature_name] = {
+    value: feature_value, computed_at, received_at: Date.now() / 1000
+  };
+  appendLog(entity_id, feature_name, feature_value, computed_at);
+  state.metrics['total_features_computed'] = (state.metrics['total_features_computed'] || 0) + 1;
+  renderMetrics();
+}
+
+// ── Metrics ────────────────────────────────────────────────────────────────
+function updateMetrics(m) {
+  Object.assign(state.metrics, m);
+  renderMetrics();
+  renderFreshness(m.feature_freshness_samples || {});
+}
+
+function renderMetrics() {
+  const m = state.metrics;
+
+  const statusEl = document.getElementById('flink-status');
+  const status = m.flink_job_status || '—';
+  statusEl.textContent = status;
+  statusEl.className = 'metric-value ' +
+    (status === 'RUNNING' ? 'good' : status === 'UNREACHABLE' ? 'bad' : 'warn');
+
+  set('total-features', (m.total_features_computed || 0).toLocaleString());
+  const dropped = m.late_events_dropped || 0;
+  const drEl = document.getElementById('late-dropped');
+  drEl.textContent = dropped.toLocaleString();
+  drEl.className = 'metric-value ' + (dropped > 10 ? 'warn' : 'good');
+
+  const lag = m.watermark_lag_seconds;
+  const lagEl = document.getElementById('wm-lag');
+  if (lag !== null && lag !== undefined) {
+    lagEl.textContent = lag.toFixed(1) + 's';
+    lagEl.className = 'metric-value ' + (lag > 120 ? 'bad' : lag > 60 ? 'warn' : 'good');
+  }
+  set('wm-ts', m.last_watermark_ts || '—');
+  set('last-update', m.last_update ? new Date(m.last_update).toLocaleTimeString() : '—');
+}
+
+function renderFreshness(samples) {
+  if (!Object.keys(samples).length) return;
+  const container = document.getElementById('freshness-list');
+  container.innerHTML = '';
+  const entries = Object.entries(samples).slice(0, 8);
+  for (const [key, age] of entries) {
+    const cls = age < 60 ? 'good' : age < 300 ? 'warn' : 'bad';
+    const row = document.createElement('div');
+    row.className = 'metric-row';
+    row.innerHTML = `<span class="metric-label">${key}</span>
+                     <span class="metric-value ${cls}">${age.toFixed(0)}s ago</span>`;
+    container.appendChild(row);
+  }
+}
+
+// ── Entity Lookup ──────────────────────────────────────────────────────────
+async function lookupEntity() {
+  const entityId = document.getElementById('entity-input').value.trim();
+  if (!entityId) return;
+  const container = document.getElementById('entity-result');
+  container.innerHTML = '<span style="color:var(--muted)">Loading…</span>';
+
+  try {
+    const res = await fetch(`/api/features/${encodeURIComponent(entityId)}`);
+    const data = await res.json();
+    if (!data.found) {
+      container.innerHTML = `<span style="color:var(--red)">No features found for "${entityId}"</span>`;
+      return;
+    }
+    renderEntityFeatures(entityId, data.features, container);
+  } catch (e) {
+    container.innerHTML = `<span style="color:var(--red)">Error: ${e.message}</span>`;
+  }
+}
+
+function renderEntityFeatures(entityId, features, container) {
+  const now = Date.now() / 1000;
+  let html = `<table class="feature-table">
+    <thead><tr><th>Feature</th><th>Value</th><th>Computed At</th><th>Age</th></tr></thead>
+    <tbody>`;
+  const sorted = Object.entries(features).sort((a,b) => a[0].localeCompare(b[0]));
+  for (const [name, info] of sorted) {
+    const age = now - (info.received_at || now);
+    const ageCls = age < 60 ? 'fresh' : age < 300 ? 'stale' : 'vstal';
+    const val = typeof info.value === 'number' ? info.value.toLocaleString(undefined, {maximumFractionDigits: 4}) : info.value;
+    html += `<tr>
+      <td>${name}</td>
+      <td class="fresh">${val}</td>
+      <td>${info.computed_at || '—'}</td>
+      <td class="${ageCls}">${age.toFixed(0)}s</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+// Allow Enter key in input
+document.getElementById('entity-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') lookupEntity();
+});
+
+// ── Live Log ───────────────────────────────────────────────────────────────
+function appendLog(entity, feature, value, ts) {
+  const log = document.getElementById('event-log');
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  const displayVal = typeof value === 'number' ? value.toFixed(4) : value;
+  line.innerHTML = `
+    <span class="log-ts">${new Date().toLocaleTimeString()}</span>
+    <span class="log-feat">${entity}</span>
+    <span style="color:var(--muted)">›</span>
+    <span class="log-feat">${feature}</span>
+    <span style="color:var(--muted)">=</span>
+    <span class="log-val">${displayVal}</span>`;
+  log.prepend(line);
+  // trim
+  while (log.children.length > MAX_LOG) log.lastChild.remove();
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function set(id, val) { const el = document.getElementById(id); if (el) el.textContent = val; }
+
+// Poll metrics every 10s as fallback
+setInterval(async () => {
+  try {
+    const res = await fetch('/api/metrics');
+    const m = await res.json();
+    updateMetrics(m);
+  } catch (_) {}
+}, 10000);
+</script>
+</body>
+</html>

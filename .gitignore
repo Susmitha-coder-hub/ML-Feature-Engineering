@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.pyc
+*.class
+*.jar
+target/
+.idea/
+*.iml
+batch_results.txt
+flink-checkpoints/
+*.log
+.DS_Store
